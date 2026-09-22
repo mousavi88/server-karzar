@@ -10,7 +10,7 @@
 import { WebSocketServer, WebSocket } from 'ws';
 import http from 'http';
 
-const PORT = process.env.PORT || 8080;
+const PORT = process.env.PORT || 3000;
 const server = http.createServer((req, res) => {
     res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
     if (req.url === '/api/rooms') {
