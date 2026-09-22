@@ -1,0 +1,8 @@
+{
+  "name": "Karzar WebSocket Server",
+  "description": "Multiplayer WebSocket server for Karzar Shahnameh Board Game",
+  "permissions": [],
+  "capabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

@@ -2,8 +2,9 @@
   "name": "karzar-server",
   "private": true,
   "version": "1.0.0",
-  "type": "module",
   "scripts": {
+    "dev": "node server.js",
+    "build": "node -e 'console.log(\"Build complete\")'",
     "start": "node server.js"
   },
   "dependencies": {
