@@ -1,6 +1,0 @@
-{
-  "name": "Karzar WebSocket Multiplayer Server",
-  "description": "سرور اختصاصی وب‌سوکت بازی تخته‌ای کارزار شاهنامه به همراه پنل تست زنده و شبیه‌ساز نبرد چندنفره",
-  "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
-}
