@@ -1,18 +1,24 @@
 // ========================================================
-// KARZAR WebSocket Multiplayer Server (Node.js)
+// KARZAR WebSocket Multiplayer Server (Node.js) - Optimized
 // ========================================================
-// Install dependencies:
-// npm install ws
-// Run server:
-// node server.js
+// Dependencies: npm install ws
+// Run: node server.js
 // ========================================================
 
 import { WebSocketServer, WebSocket } from 'ws';
 import http from 'http';
 
 const PORT = process.env.PORT || 3000;
+
+// Rooms Map: roomCode -> roomData
+const rooms = new Map();
+
 const server = http.createServer((req, res) => {
-    res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+    res.writeHead(200, { 
+        'Content-Type': 'application/json; charset=utf-8',
+        'Access-Control-Allow-Origin': '*'
+    });
+    
     if (req.url === '/api/rooms') {
         res.end(JSON.stringify(getRoomListPayload()));
     } else {
@@ -27,16 +33,16 @@ const server = http.createServer((req, res) => {
 
 const wss = new WebSocketServer({ server });
 
-// Rooms map: roomCode -> { roomCode, roomTitle, p1: { ws, name, heroId }, p2: { ws, name, heroId }, currentRound, createdAt }
-const rooms = new Map();
-
-function generateRoomCode() {
+function generateUniqueRoomCode() {
     const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
     let code = '';
-    for (let i = 0; i < 4; i++) {
-        code += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    return 'KZ-' + code;
+    do {
+        code = 'KZ-';
+        for (let i = 0; i < 4; i++) {
+            code += chars.charAt(Math.floor(Math.random() * chars.length));
+        }
+    } while (rooms.has(code));
+    return code;
 }
 
 function getRoomListPayload() {
@@ -44,12 +50,13 @@ function getRoomListPayload() {
     const activeRooms = [];
 
     for (const [code, r] of rooms.entries()) {
-        const isP2Active = r.p2 && r.p2.ws.readyState === WebSocket.OPEN;
+        const isP2Active = r.p2 && r.p2.ws && r.p2.ws.readyState === WebSocket.OPEN;
         if (!isP2Active) {
             openRooms.push({
                 roomCode: code,
                 roomTitle: r.roomTitle || 'میدان نبرد',
-                creatorName: r.p1.name || 'ناشناس',
+                creatorName: r.p1?.name || 'ناشناس',
+                creatorId: r.p1?.creatorId || null,
                 playerCount: 1,
                 statusFa: 'در انتظار حریف (۱/۲)'
             });
@@ -57,11 +64,13 @@ function getRoomListPayload() {
             activeRooms.push({
                 roomCode: code,
                 roomTitle: r.roomTitle || 'میدان نبرد',
-                creatorName: r.p1.name || 'بازیکن ۱',
+                creatorName: r.p1?.name || 'بازیکن ۱',
+                creatorId: r.p1?.creatorId || null,
                 player2Name: r.p2?.name || 'بازیکن ۲',
-                player1Hero: r.p1.heroId || 'ROSTAM',
-                player2Hero: r.p2?.heroId || 'SOHRAB',
-                currentRound: r.currentRound || 1
+                player1Hero: r.p1?.heroId || null,
+                player2Hero: r.p2?.heroId || null,
+                currentRound: r.currentRound || 1,
+                statusFa: 'در حال نبرد'
             });
         }
     }
@@ -82,35 +91,55 @@ function broadcastRoomList() {
     });
 }
 
+// ---------------- Heartbeat to clean dead connections ----------------
+const heartbeatInterval = setInterval(() => {
+    wss.clients.forEach((ws) => {
+        if (ws.isAlive === false) {
+            return ws.terminate();
+        }
+        ws.isAlive = false;
+        ws.ping();
+    });
+}, 30000);
+
+wss.on('close', () => {
+    clearInterval(heartbeatInterval);
+});
+
+// ---------------- WebSocket Event Handlers ----------------
 wss.on('connection', (ws) => {
-    console.log('[KARZAR] Client connected');
+    ws.isAlive = true;
+    ws.on('pong', () => { ws.isAlive = true; });
+
     let clientRoom = null;
     let clientPlayerId = null;
 
-    // Send room list upon connection
+    // Send initial room list on connect
     ws.send(JSON.stringify(getRoomListPayload()));
 
     ws.on('message', (message) => {
         try {
             const data = JSON.parse(message.toString());
-            const action = data.type || data.action;
+            const action = data.action || data.type;
 
             if (action === 'GET_ROOMS') {
                 ws.send(JSON.stringify(getRoomListPayload()));
             }
             else if (action === 'CREATE_ROOM') {
-                const roomCode = generateRoomCode();
+                const roomCode = generateUniqueRoomCode();
                 clientRoom = roomCode;
                 clientPlayerId = 1;
                 const roomTitle = data.roomTitle || 'میدان نبرد';
                 const playerName = data.playerName || 'پهلوان ۱';
+                const creatorId = data.creatorId || null;
 
                 rooms.set(roomCode, {
                     roomCode,
                     roomTitle,
-                    p1: { ws, name: playerName, heroId: 'ROSTAM' },
+                    p1: { ws, name: playerName, creatorId, heroId: null },
                     p2: null,
                     currentRound: 1,
+                    inGame: false,
                     createdAt: Date.now()
                 });
 
@@ -119,26 +148,28 @@ wss.on('connection', (ws) => {
                     roomCode: roomCode
                 }));
 
-                console.log(`[KARZAR] Room created: ${roomCode} ("${roomTitle}") by ${playerName}`);
                 broadcastRoomList();
             }
             else if (action === 'JOIN_ROOM') {
                 const roomCode = data.roomCode?.toUpperCase().trim();
                 const room = rooms.get(roomCode);
+
                 if (!room) {
                     ws.send(JSON.stringify({ type: 'ERROR', message: 'اتاق با این کد یافت نشد!' }));
                     return;
                 }
-                if (room.p2 && room.p2.ws.readyState === WebSocket.OPEN) {
-                    ws.send(JSON.stringify({ type: 'ERROR', message: 'اتاق پر است (حداکثر ۲ بازیکن)!' }));
+                if (room.p2 && room.p2.ws && room.p2.ws.readyState === WebSocket.OPEN) {
+                    ws.send(JSON.stringify({ type: 'ERROR', message: 'ظرفیت اتاق تکمیل است (۲/۲)!' }));
                     return;
                 }
+
                 clientRoom = roomCode;
                 clientPlayerId = 2;
                 const playerName = data.playerName || 'پهلوان ۲';
-                room.p2 = { ws, name: playerName, heroId: 'SOHRAB' };
+                room.p2 = { ws, name: playerName, heroId: null };
+                room.inGame = true;
 
-                // Notify P2
+                // Notify Player 2
                 ws.send(JSON.stringify({
                     type: 'ROOM_JOINED',
                     roomCode: roomCode,
@@ -146,7 +177,7 @@ wss.on('connection', (ws) => {
                     opponentName: room.p1.name
                 }));
 
-                // Notify P1
+                // Notify Player 1
                 if (room.p1.ws.readyState === WebSocket.OPEN) {
                     room.p1.ws.send(JSON.stringify({
                         type: 'PLAYER_JOINED',
@@ -154,95 +185,75 @@ wss.on('connection', (ws) => {
                     }));
                 }
 
-                // Broadcast Game Start to both players
+                // Random starting player (1 or 2)
+                const startingPlayer = Math.random() < 0.5 ? 1 : 2;
                 const startMsg = JSON.stringify({
                     type: 'GAME_START',
-                    startingPlayer: 1
+                    startingPlayer: startingPlayer
                 });
-                room.p1.ws.send(startMsg);
-                room.p2.ws.send(startMsg);
 
-                console.log(`[KARZAR] Player 2 (${playerName}) joined room: ${roomCode}. Game started!`);
+                if (room.p1.ws.readyState === WebSocket.OPEN) room.p1.ws.send(startMsg);
+                if (room.p2.ws.readyState === WebSocket.OPEN) room.p2.ws.send(startMsg);
+
                 broadcastRoomList();
-            }
-            else if (action === 'LEAVE_ROOM') {
-                if (clientRoom && rooms.has(clientRoom)) {
-                    const room = rooms.get(clientRoom);
-                    if (room) {
-                        const opponent = clientPlayerId === 1 ? room.p2 : room.p1;
-                        if (opponent && opponent.ws && opponent.ws.readyState === WebSocket.OPEN) {
-                            opponent.ws.send(JSON.stringify({ type: 'OPPONENT_LEFT' }));
-                        }
-                        rooms.delete(clientRoom);
-                    }
-                    clientRoom = null;
-                    clientPlayerId = null;
-                    broadcastRoomList();
-                }
             }
             else if (action === 'GAME_ACTION') {
                 const roomCode = data.roomCode || clientRoom;
                 const room = roomCode ? rooms.get(roomCode) : null;
-                if (room) {
-                    if (data.actionType === 'SELECT_HERO' && data.payload?.heroId) {
-                        if (clientPlayerId === 1) room.p1.heroId = data.payload.heroId;
-                        else if (clientPlayerId === 2 && room.p2) room.p2.heroId = data.payload.heroId;
-                        broadcastRoomList();
-                    } else if (data.actionType === 'NEXT_ROUND' && data.payload?.round) {
-                        room.currentRound = data.payload.round;
-                        broadcastRoomList();
-                    }
+                if (!room) return;
 
-                    const opponent = clientPlayerId === 1 ? room.p2 : room.p1;
-                    if (opponent && opponent.ws && opponent.ws.readyState === WebSocket.OPEN) {
-                        opponent.ws.send(JSON.stringify({
-                            type: 'ACTION_BROADCAST',
-                            actionType: data.actionType,
-                            payload: data.payload
-                        }));
-                    }
+                // Track hero selection internally
+                if (data.actionType === 'SELECT_HERO' && data.payload?.heroId) {
+                    if (clientPlayerId === 1 && room.p1) room.p1.heroId = data.payload.heroId;
+                    else if (clientPlayerId === 2 && room.p2) room.p2.heroId = data.payload.heroId;
+                } else if (data.actionType === 'NEXT_ROUND' && data.payload?.round) {
+                    room.currentRound = data.payload.round;
+                }
+
+                // Forward only to the opponent
+                const opponent = clientPlayerId === 1 ? room.p2 : room.p1;
+                if (opponent && opponent.ws && opponent.ws.readyState === WebSocket.OPEN) {
+                    opponent.ws.send(JSON.stringify({
+                        type: 'ACTION_BROADCAST',
+                        actionType: data.actionType,
+                        payload: data.payload
+                    }));
                 }
             }
-            else if (action === 'RESTART_GAME') {
-                const room = rooms.get(data.roomCode || clientRoom);
-                if (room) {
-                    room.currentRound = 1;
-                    const restartMsg = JSON.stringify({
-                        type: 'GAME_START',
-                        startingPlayer: 1
-                    });
-                    if (room.p1?.ws?.readyState === WebSocket.OPEN) room.p1.ws.send(restartMsg);
-                    if (room.p2?.ws?.readyState === WebSocket.OPEN) room.p2.ws.send(restartMsg);
-                    broadcastRoomList();
-                }
+            else if (action === 'LEAVE_ROOM') {
+                handleClientLeave(clientRoom, clientPlayerId);
+                clientRoom = null;
+                clientPlayerId = null;
             }
         } catch (e) {
-            console.error('[KARZAR] Error handling message:', e);
+            console.error('[KARZAR] Error processing message:', e);
         }
     });
 
+    function handleClientLeave(code, pId) {
+        if (!code || !rooms.has(code)) return;
+        const room = rooms.get(code);
+
+        const opponent = pId === 1 ? room.p2 : room.p1;
+        if (opponent && opponent.ws && opponent.ws.readyState === WebSocket.OPEN) {
+            opponent.ws.send(JSON.stringify({
+                type: 'OPPONENT_LEFT',
+                message: 'حریف از اتاق خارج شد.'
+            }));
+        }
+
+        // Close room if creator leaves or if game was already active
+        rooms.delete(code);
+        broadcastRoomList();
+    }
+
     ws.on('close', () => {
-        if (clientRoom && rooms.has(clientRoom)) {
-            const room = rooms.get(clientRoom);
-            if (room) {
-                const opponent = clientPlayerId === 1 ? room.p2 : room.p1;
-                if (opponent && opponent.ws && opponent.ws.readyState === WebSocket.OPEN) {
-                    opponent.ws.send(JSON.stringify({ type: 'OPPONENT_LEFT' }));
-                }
-                if (clientPlayerId === 1 && !room.p2) {
-                    rooms.delete(clientRoom);
-                } else if (clientPlayerId === 1 && room.p2) {
-                    rooms.delete(clientRoom);
-                } else if (clientPlayerId === 2) {
-                    room.p2 = null;
-                }
-            }
-            broadcastRoomList();
+        if (clientRoom) {
+            handleClientLeave(clientRoom, clientPlayerId);
         }
     });
 });
 
 server.listen(PORT, () => {
-    console.log('Karzar Server is listening on port ' + PORT);
+    console.log(`[KARZAR] Server running successfully on port ${PORT}`);
 });
-
